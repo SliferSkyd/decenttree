@@ -468,6 +468,103 @@ else()
     message("OpenMP              : NONE")
 endif()
 
+# ---------------- Auto-select vector ISA so `cmake .. && make` just works -----
+# If the user didn't set DECENTTREE_FLAGS, pick the best vectorization the
+# compiler supports on this platform (x86/x86_64).
+if (NOT DEFINED DECENTTREE_FLAGS OR "${DECENTTREE_FLAGS}" STREQUAL "")
+  set(DECENTTREE_FLAGS "")
+  include(CheckCXXCompilerFlag)
+
+  # Detect CPU support for vector instruction sets when we can run code on the host.
+  set(_dt_can_check_cpu_features TRUE)
+  if (CMAKE_CROSSCOMPILING)
+    set(_dt_can_check_cpu_features FALSE)
+  elseif (NOT (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|Intel"))
+    # __builtin_cpu_supports is a GNU/Clang/ICC extension; skip on other compilers.
+    set(_dt_can_check_cpu_features FALSE)
+  endif()
+
+  if (_dt_can_check_cpu_features)
+    include(CheckCXXSourceRuns)
+    set(_dt_orig_required_flags "${CMAKE_REQUIRED_FLAGS}")
+    set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -O0")
+    foreach(_dt_feature IN ITEMS avx512f avx512dq avx512bw avx512vl avx2 fma avx)
+      string(TOUPPER "${_dt_feature}" _dt_feature_upper)
+      set(_dt_feature_test_program [=[
+#include <immintrin.h>
+int main() {
+#if defined(__GNUC__) || defined(__clang__) || defined(__INTEL_COMPILER)
+  return __builtin_cpu_supports("FEATURE") ? 0 : 1;
+#else
+  return 1;
+#endif
+}
+]=])
+      string(REPLACE "FEATURE" "${_dt_feature}" _dt_feature_test_program "${_dt_feature_test_program}")
+      set(_dt_feature_var "DT_CPU_HAS_${_dt_feature_upper}")
+      check_cxx_source_runs("${_dt_feature_test_program}" ${_dt_feature_var})
+    endforeach()
+    set(CMAKE_REQUIRED_FLAGS "${_dt_orig_required_flags}")
+  endif()
+
+  if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|x86")
+    if (MSVC)
+      # Check MSVC front-end switches
+      check_cxx_compiler_flag("/arch:AVX512" HAS_AVX512)
+      check_cxx_compiler_flag("/arch:AVX2"   HAS_AVX2)
+      check_cxx_compiler_flag("/arch:AVX"    HAS_AVX)
+
+      if (HAS_AVX512)
+        set(DECENTTREE_FLAGS "avx512")
+      elseif (HAS_AVX2)
+        set(DECENTTREE_FLAGS "avx2")
+      elseif (HAS_AVX)
+        set(DECENTTREE_FLAGS "avx")
+      else()
+        set(DECENTTREE_FLAGS "nosse")
+      endif()
+
+    else() # GCC/Clang/ICC classic
+      check_cxx_compiler_flag("-mavx512f"  HAS_AVX512F)
+      check_cxx_compiler_flag("-mavx512dq" HAS_AVX512DQ)
+      check_cxx_compiler_flag("-mavx512bw" HAS_AVX512BW)
+      check_cxx_compiler_flag("-mavx512vl" HAS_AVX512VL)
+      check_cxx_compiler_flag("-mavx2"     HAS_AVX2)
+      check_cxx_compiler_flag("-mfma"      HAS_FMA)
+      check_cxx_compiler_flag("-mavx"      HAS_AVX)
+
+      if (HAS_AVX512F AND HAS_AVX512DQ AND HAS_AVX512BW AND HAS_AVX512VL AND HAS_FMA
+          AND (NOT DEFINED DT_CPU_HAS_AVX512F OR DT_CPU_HAS_AVX512F)
+          AND (NOT DEFINED DT_CPU_HAS_AVX512DQ OR DT_CPU_HAS_AVX512DQ)
+          AND (NOT DEFINED DT_CPU_HAS_AVX512BW OR DT_CPU_HAS_AVX512BW)
+          AND (NOT DEFINED DT_CPU_HAS_AVX512VL OR DT_CPU_HAS_AVX512VL)
+          AND (NOT DEFINED DT_CPU_HAS_FMA OR DT_CPU_HAS_FMA))
+        set(DECENTTREE_FLAGS "avx512")
+      elseif (HAS_AVX2 AND HAS_FMA
+              AND (NOT DEFINED DT_CPU_HAS_AVX2 OR DT_CPU_HAS_AVX2)
+              AND (NOT DEFINED DT_CPU_HAS_FMA OR DT_CPU_HAS_FMA))
+        set(DECENTTREE_FLAGS "avx2")
+      elseif (HAS_AVX AND HAS_FMA
+              AND (NOT DEFINED DT_CPU_HAS_AVX OR DT_CPU_HAS_AVX)
+              AND (NOT DEFINED DT_CPU_HAS_FMA OR DT_CPU_HAS_FMA))
+        set(DECENTTREE_FLAGS "fma")
+      elseif (HAS_AVX
+              AND (NOT DEFINED DT_CPU_HAS_AVX OR DT_CPU_HAS_AVX))
+        set(DECENTTREE_FLAGS "avx")
+      else()
+        set(DECENTTREE_FLAGS "nosse")
+      endif()
+    endif()
+  else()
+    # Non-x86 targets: don’t add x86 vector flags
+    set(DECENTTREE_FLAGS "nosse")
+  endif()
+
+  message(STATUS "Auto-selected DECENTTREE_FLAGS=${DECENTTREE_FLAGS}")
+endif()
+# ----------------------------------------------------------------------------- 
+
+
 ##################################################################
 # configure SSE/AVX/FMA instructions
 ##################################################################
@@ -521,44 +618,79 @@ elseif (ICC)
     endif()
 endif()
 
+# --- AVX2 ------------------------------------------------------
+# Enables compiler flags and preprocessor symbols for AVX2 (+FMA).
+SET(AVX2_FLAGS "-D__SSE3 -D__AVX -D__AVX2__")
+if (VCC)
+    # MSVC (VS 2013+ for /arch:AVX2)
+    set(AVX2_FLAGS "${AVX2_FLAGS} /arch:AVX2")
+elseif (CLANG OR GCC)
+    # AVX2 era generally implies FMA on x86_64 (Haswell+)
+    set(AVX2_FLAGS "${AVX2_FLAGS} -mavx2 -mfma")
+elseif (ICC)
+    if (WIN32)
+        set(AVX2_FLAGS "${AVX2_FLAGS} /arch:core-avx2")
+    else()
+        set(AVX2_FLAGS "${AVX2_FLAGS} -xCORE-AVX2")
+    endif()
+endif()
+
+# --- AVX-512 ---------------------------------------------------
+# Expand AVX-512 set for GCC/Clang to include common subsets.
+# NOTE: controlled by DECENTTREE_FLAGS "avx512" (and not "no512")
 SET(AVX512_FLAGS "-D__SSE3 -D__AVX")
-if (DECENTTREE_FLAGS MATCHES "no512")
-else()
+if (NOT DECENTTREE_FLAGS MATCHES "no512")
     if (VCC)
-        #AVX512 available with Visual Studio 17 and up
+        # VS 2022+ supports /arch:AVX512
         set(AVX512_FLAGS "${AVX512_FLAGS} /arch:AVX512")
-    elseif (CLANG)
-        set(AVX512_FLAGS "${AVX512_FLAGS} -mavx512f -mfma")
-    elseif (GCC)
-        set(AVX512_FLAGS "${AVX512_FLAGS} -mavx512f -mfma")
+    elseif (CLANG OR GCC)
+        # Base + common subsets; adjust if you need more granularity
+        set(AVX512_FLAGS "${AVX512_FLAGS} -mavx512f -mavx512dq -mavx512bw -mavx512vl -mfma")
     elseif (ICC)
         if (WIN32)
-            set(AVX512_FLAGS "${AVX512_FLAGS} /QxMIC-AVX512")
+            set(AVX512_FLAGS "${AVX512_FLAGS} /QxCORE-AVX512")
         else()
-            set(AVX512_FLAGS "${AVX512_FLAGS} -xMIC-AVX512")
+            set(AVX512_FLAGS "${AVX512_FLAGS} -xCORE-AVX512")
         endif()
     endif()
 endif()
+
+
 # further flag to improve performance
 
-if (DECENTTREE_FLAGS MATCHES "fma") # AVX+FMA instruction set
+# ---------------- Vectorization selection (by DECENTTREE_FLAGS) ----------------
+# Accepted values: avx, fma, avx2, avx512, nosse, no512, KNL
+if (DECENTTREE_FLAGS MATCHES "avx512" AND NOT DECENTTREE_FLAGS MATCHES "no512")
+    message("Vectorization : AVX-512")
+    add_definitions(-D__SSE3 -D__AVX -D__AVX512F__)
+    set(COMBINED_FLAGS "${COMBINED_FLAGS} ${AVX512_FLAGS}")
+
+elseif (DECENTTREE_FLAGS MATCHES "avx2")
+    message("Vectorization : AVX2 (+FMA)")
+    add_definitions(-D__SSE3 -D__AVX -D__AVX2__)
+    set(COMBINED_FLAGS "${COMBINED_FLAGS} ${AVX2_FLAGS}")
+
+elseif (DECENTTREE_FLAGS MATCHES "fma") # AVX+FMA instruction set
     message("Vectorization : AVX+FMA")
-    add_definitions(-D__SSE3 -D__AVX) # define both SSE3 and AVX directive
+    add_definitions(-D__SSE3 -D__AVX)
     set(COMBINED_FLAGS "${COMBINED_FLAGS} ${FMA_FLAGS}")
+
 elseif (DECENTTREE_FLAGS MATCHES "avx") # AVX instruction set
     message("Vectorization : AVX")
-    add_definitions(-D__SSE3 -D__AVX) # define both SSE3 and AVX directive
+    add_definitions(-D__SSE3 -D__AVX)
     set(COMBINED_FLAGS "${COMBINED_FLAGS} ${AVX_FLAGS}")
-elseif (NOT DECENTTREE_FLAGS MATCHES "nosse") #SSE intruction set
+
+elseif (NOT DECENTTREE_FLAGS MATCHES "nosse") # SSE baseline
     if (DECENTTREE_FLAGS MATCHES "KNL")
-        message("Vectorization : SSE3/AVX/AVX2/AVX-512")
+        message("Vectorization : SSE3/AVX/AVX2/AVX-512 (KNL)")
         add_definitions(-D__AVX512KNL)
     else()
-        message("Vectorization : SSE3/AVX/AVX2")
+        message("Vectorization : SSE3/AVX/AVX2 (baseline SSE)")
     endif()
-    #add_definitions(-D__SSE3)
-    #set(COMBINED_FLAGS "${COMBINED_FLAGS} ${SSE_FLAGS}")
+    # If you want explicit -msse3 baseline, uncomment below:
+    # set(COMBINED_FLAGS "${COMBINED_FLAGS} ${SSE_FLAGS}")
 endif()
+
 
 ##################################################################
 # Setup compiler flags
@@ -699,7 +831,10 @@ if(Backtrace_FOUND)
   target_link_libraries(decenttree ${Backtrace_LIBRARY})
 endif(Backtrace_FOUND)
 
-if (NOT DECENTTREE_FLAGS MATCHES "avx" AND NOT DECENTTREE_FLAGS MATCHES "fma")
+if (NOT DECENTTREE_FLAGS MATCHES "avx"
+    AND NOT DECENTTREE_FLAGS MATCHES "avx2"
+    AND NOT DECENTTREE_FLAGS MATCHES "avx512"
+    AND NOT DECENTTREE_FLAGS MATCHES "fma")
     if (NOT DECENTTREE_FLAGS MATCHES "nosse")
         set_target_properties(decenttree vectorclass PROPERTIES COMPILE_FLAGS "${SSE_FLAGS}")
     endif()

@@ -36,6 +36,8 @@
 #include <utils/safe_io.h>   //for safeGetTrimmedLineAsStream
 #include <utils/progress.h>  //for progress_display
 
+#include <cstdint>
+
 #define MATRIX_ALIGNMENT 64
     //MUST be a power of 2 (else x & MATRIX_ALIGNMENT_MASK
     //would be no good and x % MATRIX_ALIGNMENT would be needed).
@@ -331,15 +333,28 @@ public:
             //Move the data in the array closer to the front.
             //This also helps (but: only very slightly. 5%ish?).
             size_t w = widthNeededFor(column_count);
-            destRow  = data;
-            for (intptr_t r=1; r<row_count; ++r) {
-                destRow += w;
-                sourceRow = rows[r];
+            T* alignedStart = matrixAlign(data);
+            if (rows[0] != alignedStart) {
+                T* src0 = rows[0];
                 #ifdef _OPENMP
                 #pragma omp parallel for
                 #endif
                 for (intptr_t c=0; c<column_count; ++c) {
-                    destRow[c] = sourceRow[c];
+                    alignedStart[c] = src0[c];
+                }
+            }
+            rows[0] = alignedStart;
+            destRow  = alignedStart;
+            for (intptr_t r=1; r<row_count; ++r) {
+                destRow += w;
+                sourceRow = rows[r];
+                if (destRow != sourceRow) {
+                    #ifdef _OPENMP
+                    #pragma omp parallel for
+                    #endif
+                    for (intptr_t c=0; c<column_count; ++c) {
+                        destRow[c] = sourceRow[c];
+                    }
                 }
                 rows[r] = destRow;
             }

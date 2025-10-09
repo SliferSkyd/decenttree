@@ -10,6 +10,8 @@
 #include <vector>
 #include <algorithm> //for std::transform
 #include <string>    //for std::string
+#include <cstdint>
+
 
 /**
         vector of double number
@@ -30,7 +32,7 @@ typedef std::vector<int> IntVector;
 /**
         vector of intptr_t
  */
-typedef std::vector<intptr_t> Int64Vector;
+typedef std::vector<std::intptr_t> Int64Vector;
 
 /**
  * @brief  A subclass of vector (or other container) class S, where the

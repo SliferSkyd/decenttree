@@ -891,6 +891,144 @@ typedef VectorizedBoundingMatrix
         <NJFloat, FloatVector, FloatBoolVector, BIONJMatrix<NJFloat> >
         Vectorized_RapidBIONJ;
 
+#include <immintrin.h>
+#include <cstdint>
+#include <cassert>
+
+// T must be float
+template <class T = NJFloat>
+class VectorizedRapidNJAligned : public BoundingMatrix<T, NJMatrix<T>> {
+    static_assert(std::is_same<T,float>::value,
+                  "RapidNJ-VA expects T=float (NJFloat)");
+    using Base = BoundingMatrix<T, NJMatrix<T>>;
+    using Base::row_count; using Base::clusters; using Base::rowTotals;
+    using Base::rowToCluster; using Base::clusterTotals; using Base::clusterToRow;
+    using Base::scaledClusterTotals; using Base::scaledMaxEarlierClusterTotal;
+    using Base::entriesSorted; using Base::entryToCluster;
+    using Base::rowMinima; using Base::rowScanOrder; using Base::decideOnRowScanningOrder;
+    using Base::getRowMinimum;
+
+    inline Position<T> getRowMinimumVA(size_t row, T maxTot, T qBest) const {
+        const T kInf     = (T)infiniteDistance;
+        const T nless2   = (T)(row_count - 2);
+        const T tMult    = (row_count <= 2) ? (T)0 : ((T)1 / nless2);
+        const T rowTotSc = rowTotals[row] * tMult;
+        T       bound    = qBest + maxTot + rowTotSc;
+
+        const T*   values    = entriesSorted.rows[row];   // sorted asc, +inf sentinel
+        const int* toCluster = entryToCluster.rows[row];
+        
+        Position<T> pos(row, 0, kInf, 0);
+
+        __m256  minQ    = _mm256_set1_ps(kInf);
+        __m256i minIdxI = _mm256_set1_epi32(-1);
+        const __m256  vRowTotSc = _mm256_set1_ps(rowTotSc);
+        const __m256  vBound    = _mm256_set1_ps(bound);
+        const __m256i v01234567 = _mm256_setr_epi32(0,1,2,3,4,5,6,7);
+
+        size_t col = 0;
+        for (;; col += 8) {
+            __m256 vD = _mm256_load_ps(values + col); // aligned
+
+            __m256 mLT = _mm256_cmp_ps(vD, vBound, _CMP_LT_OQ);
+            int    mask = _mm256_movemask_ps(mLT);
+
+            if (mask == 0xFF) {
+                __m256i vC   = _mm256_load_si256((const __m256i*)(toCluster + col)); // aligned
+                __m256  vTot = _mm256_i32gather_ps(scaledClusterTotals.data(), vC, 4);
+                __m256  vQ   = _mm256_sub_ps(_mm256_sub_ps(vD, vTot), vRowTotSc);
+
+                __m256  better = _mm256_cmp_ps(vQ, minQ, _CMP_LT_OQ);
+                minQ           = _mm256_blendv_ps(minQ, vQ, better);
+
+                __m256i vIdxI  = _mm256_add_epi32(_mm256_set1_epi32((int)col), v01234567);
+                __m256i mb     = _mm256_castps_si256(better);
+                minIdxI        = _mm256_blendv_epi8(minIdxI, vIdxI, mb);
+                continue;
+            }
+            if (mask == 0x00) break;  // row is sorted; remaining blocks cannot beat bound
+
+            // partial block: handle first k lanes then stop
+            int k = __builtin_ctz(~mask & 0xFF);
+            for (int j = 0; j < k; ++j) {
+                const int c = toCluster[col + j];
+                const T   q = values[col + j] - scaledClusterTotals[c] - rowTotSc;
+                if (q < pos.value) { pos.value = q; pos.column = col + j; }
+            }
+            break;
+        }
+        // assert(0);
+        alignas(32) float qBuf[8];
+        alignas(32) int   iBuf[8];
+        _mm256_store_ps(qBuf,   minQ);                 // aligned store (safe due to alignas)
+        _mm256_store_si256((__m256i*)iBuf, minIdxI);
+
+        for (int k = 0; k < 8; ++k) {
+            float qk = qBuf[k];
+            if (qk < pos.value && iBuf[k] >= 0) {
+                pos.value  = qk;
+                pos.column = (size_t)iBuf[k];
+            }
+        }
+
+        if (pos.value < kInf) {
+            const int otherRow = clusterToRow[ toCluster[pos.column] ];
+            if (otherRow != notMappedToRow) {
+                const size_t other = (size_t)otherRow;
+                pos.column   = (other < row) ? other : row;
+                pos.row      = (other < row) ? row   : other;
+            }
+        }
+        return pos;
+    }
+
+public:
+    std::string getAlgorithmName() const override { return "RapidNJ-VA"; }
+
+    void getRowMinima() const override {
+        const T kInf = (T)infiniteDistance;
+
+        const size_t c = clusters.size();
+        const T nless2      = (T)(row_count - 2);
+        const T tMultiplier = (row_count <= 2) ? (T)0 : ((T)1 / nless2);
+
+        T maxTot = -kInf;
+        scaledClusterTotals.resize(c);
+        scaledMaxEarlierClusterTotal.resize(c);
+
+        for (size_t i = 0; i < c; ++i) {
+            const T st = clusterTotals[i] * tMultiplier;
+            scaledClusterTotals[i]          = st;
+            scaledMaxEarlierClusterTotal[i] = maxTot;
+            if (clusterToRow[i] != notMappedToRow) {
+                if (maxTot < st) maxTot = st;
+            }
+        }
+
+        T qBest = kInf;
+        decideOnRowScanningOrder(qBest);
+        rowMinima.resize(row_count);
+
+        #pragma omp parallel for
+        for (intptr_t r = 0; r < (intptr_t)row_count; ++r) {
+            const size_t row     = rowScanOrder[r];
+            const size_t cluster = rowToCluster[row];
+            const T maxEarlier   = scaledMaxEarlierClusterTotal[cluster];
+
+            Position<T> p = getRowMinimumVA(row, maxEarlier, qBest);
+            rowMinima[r] = p;
+
+            if (p.value < qBest) {
+                #pragma omp critical(qbest_update)
+                { if (p.value < qBest) qBest = p.value; }
+            }
+        }
+    }
+};
+
+using RapidNJ_VA = VectorizedRapidNJAligned<NJFloat>;
+
+
 #endif //USE_VECTORCLASS_LIBRARY
 
 }

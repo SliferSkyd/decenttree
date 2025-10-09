@@ -74,7 +74,7 @@ namespace StartTree
  *        USE_VECTORCLASS_LIBRARY is defined and is set to a non-zero value.
  */
 void addBioNJ2020TreeBuilders(Registry& f) {
-    const char* defaultName = "RapidNJ";
+    const char* defaultName = "NJ-R";
     ADVERTISE(NJMatrix<NJFloat>,     "NJ",      "Neighbour Joining (Saitou, Nei [1987])");
     ADVERTISE(UNJMatrix<NJFloat>,    "UNJ",     "Unweighted Neighbour Joining (Gascel [1997])");
     ADVERTISE(RapidNJ,               "NJ-R",    "Rapid Neighbour Joining"
@@ -82,6 +82,7 @@ void addBioNJ2020TreeBuilders(Registry& f) {
 
     ADVERTISE(RapidNJ,           defaultName,   "Rapid Neighbour Joining"
                                                 " (Simonsen, Mailund, Pedersen [2011])");
+    ADVERTISE(RapidNJ_VA,            "NJ-R-VA", "Rapid Neighbour Joining (vectorized AVX2, safe & aligned)");
 
     ADVERTISE(FancyNJMatrix<NJFloat>,"ONJ-R",   "Rapid Neighbour Joining (a rival version)"
                                                 " (Simonsen, Mailund, Pedersen [2011])");
