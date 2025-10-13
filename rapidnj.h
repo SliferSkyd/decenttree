@@ -1028,6 +1028,192 @@ public:
 
 using RapidNJ_VA = VectorizedRapidNJAligned<NJFloat>;
 
+// ===================== RapidNJ_V512 (AVX-512 optimized) ======================
+
+#ifndef RNJ_ASSUME_ALIGNED_ROWS
+#define RNJ_ASSUME_ALIGNED_ROWS 1   // set to 1 if rows are 64B-aligned & padded to 16
+#endif
+
+template <class T = NJFloat>
+class RapidNJ_V512 : public BoundingMatrix<T, NJMatrix<T>> {
+    static_assert(std::is_same<T,float>::value,
+                  "RapidNJ_V512 expects T=float (NJFloat)");
+
+    using Base = BoundingMatrix<T, NJMatrix<T>>;
+    using Base::row_count; using Base::clusters; using Base::rowTotals;
+    using Base::rowToCluster; using Base::clusterTotals; using Base::clusterToRow;
+    using Base::scaledClusterTotals; using Base::scaledMaxEarlierClusterTotal;
+    using Base::entriesSorted; using Base::entryToCluster;
+    using Base::rowMinima; using Base::rowScanOrder; using Base::decideOnRowScanningOrder;
+
+    // --- small helpers --------------------------------------------------------
+    static inline int first_set_lane(unsigned mask) {
+        // return [0..15] of least-significant 1-bit; undefined if mask==0
+        return _tzcnt_u32(mask);
+    }
+    static inline unsigned clear_first(unsigned mask) {
+        return mask & (mask - 1u);
+    }
+
+    // Validate a candidate lane: check otherRow live; update pos & bestQ
+    inline void consider_lane(size_t row, int otherClusterIdx, float q,
+                              Position<T>& pos, float& bestQ) const {
+        if (q >= bestQ) return;
+        const int otherRow = clusterToRow[(size_t)otherClusterIdx];
+        if (otherRow == notMappedToRow) return;
+
+        bestQ     = q;
+        pos.value = q;
+        if (otherRow < (int)row) { pos.column = otherRow; pos.row = (int)row; }
+        else { pos.column = (int)row; pos.row = otherRow; }
+    }
+
+    // --- the hot kernel for a single row (AVX-512) ---------------------------
+    inline Position<T> row_min_avx512(size_t row, float maxTot, float qBest) const {
+        const float* __restrict values    = entriesSorted.rows[row];   // sorted, +inf sentinel
+        const int*   __restrict toCluster = entryToCluster.rows[row];
+
+        const float nless2   = (float)(row_count - 2);
+        const float tMult    = (row_count <= 2) ? 0.0f : (1.0f / nless2);
+        const float rowTotSc = rowTotals[row] * tMult;
+
+        Position<T> pos((int)row, 0, (float)infiniteDistance, 0);
+        float  bestQ = pos.value;
+
+        // Initial per-row bound (tightened during the scan)
+        float  bound = std::min(qBest, bestQ) + maxTot + rowTotSc;
+
+        // Cap on how many entries this S-row actually has
+        const size_t partners = this->clusterPartners[ rowToCluster[row] ];
+        const size_t limit    = partners & ~size_t(15);  // full 16-lane blocks
+
+        const float* __restrict sct = scaledClusterTotals.data();
+
+        __m512 vRowTotSc = _mm512_set1_ps(rowTotSc);
+        __m512 vBound    = _mm512_set1_ps(bound);
+
+        alignas(64) float qBuf[16];
+        alignas(64) int   idxBuf[16];
+
+        size_t col = 0;
+        for (; col < limit; col += 16) {
+#if RNJ_ASSUME_ALIGNED_ROWS
+            __m512 vD   = _mm512_load_ps(values + col);
+            __m512i vIx = _mm512_load_si512((const void*)(toCluster + col));
+#else
+            __m512 vD   = _mm512_loadu_ps(values + col);
+            __m512i vIx = _mm512_loadu_si512((const void*)(toCluster + col));
+#endif
+            // Early reject by bound (row sorted ascending)
+            __mmask16 mActive = _mm512_cmp_ps_mask(vD, vBound, _CMP_LT_OQ);
+            if (mActive == 0) break;
+
+            // Gather scaled totals: D - SCT - rowTot
+            __m512 vTot = _mm512_i32gather_ps(vIx, sct, 4);
+            __m512 vQ   = _mm512_sub_ps(_mm512_sub_ps(vD, vTot), vRowTotSc);
+
+            // Lanes that beat current bestQ
+            __mmask16 mBetter = _mm512_cmplt_ps_mask(vQ, _mm512_set1_ps(bestQ));
+            if (mBetter) {
+                // Store vectors once; iterate only set lanes (no compressstore dependency)
+#if RNJ_ASSUME_ALIGNED_ROWS
+                _mm512_store_ps(qBuf,   vQ);
+                _mm512_store_si512((void*)idxBuf, vIx);
+#else
+                _mm512_storeu_ps(qBuf,   vQ);
+                _mm512_storeu_si512((void*)idxBuf, vIx);
+#endif
+                unsigned mask = (unsigned)mBetter;
+                while (mask) {
+                    int j = first_set_lane(mask);
+                    consider_lane(row, idxBuf[j], qBuf[j], pos, bestQ);
+                    mask = clear_first(mask);
+                }
+                // Tighten bound for subsequent blocks of this row
+                float newBound = std::min(qBest, bestQ) + maxTot + rowTotSc;
+                if (newBound < bound) { bound = newBound; vBound = _mm512_set1_ps(bound); }
+            }
+
+            // Prefetch next block and indirect SCT for +32 ahead (cheap hint)
+            _mm_prefetch((const char*)(values    + col + 64), _MM_HINT_T0);
+            _mm_prefetch((const char*)(toCluster + col + 64), _MM_HINT_T0);
+            // Indirect SCT prefetch: peek next indices (avoid OOB if near end)
+            if (col + 32 < partners) {
+#if RNJ_ASSUME_ALIGNED_ROWS
+                __m512i vIx2 = _mm512_load_si512((const void*)(toCluster + col + 16));
+#else
+                __m512i vIx2 = _mm512_loadu_si512((const void*)(toCluster + col + 16));
+#endif
+                alignas(64) int nxt[16];
+                _mm512_store_si512((void*)nxt, vIx2);
+#pragma unroll(8)
+                for (int k = 0; k < 16; ++k) _mm_prefetch((const char*)(sct + nxt[k]), _MM_HINT_T0);
+            }
+        }
+
+        // Scalar tail (<= partners)
+        for (; col < partners; ++col) {
+            float Drc = values[col];
+            if (Drc >= bound && col) break;  // sorted: remaining entries cannot beat bound
+            float q = Drc - scaledClusterTotals[ toCluster[col] ] - rowTotSc;
+            if (q < bestQ) {
+                consider_lane(row, toCluster[col], q, pos, bestQ);
+                float newBound = std::min(qBest, bestQ) + maxTot + rowTotSc;
+                if (newBound < bound) bound = newBound;
+            }
+        }
+        return pos;
+    }
+
+public:
+    std::string getAlgorithmName() const override { return "RapidNJ-V512"; }
+
+    void getRowMinima() const override {
+        // Recompute scaled totals and per-cluster "max earlier" (same as base)
+        const float kInf = (float)infiniteDistance;
+
+        const size_t c = clusters.size();
+        const float nless2      = (float)(row_count - 2);
+        const float tMultiplier = (row_count <= 2) ? 0.0f : (1.0f / nless2);
+
+        float maxTot = -kInf;
+        scaledClusterTotals.resize(c);
+        scaledMaxEarlierClusterTotal.resize(c);
+
+        for (size_t i = 0; i < c; ++i) {
+            const float st = clusterTotals[i] * tMultiplier;
+            scaledClusterTotals[i]          = st;
+            scaledMaxEarlierClusterTotal[i] = maxTot;
+            if (clusterToRow[i] != notMappedToRow) {
+                if (maxTot < st) maxTot = st;
+            }
+        }
+
+        float qBest = kInf;
+        decideOnRowScanningOrder(qBest);
+        rowMinima.resize(row_count);
+
+        // Parallel over rows in selected order
+        #pragma omp parallel for
+        for (intptr_t r = 0; r < (intptr_t)row_count; ++r) {
+            const size_t row     = rowScanOrder[r];
+            const size_t cluster = rowToCluster[row];
+            const float  maxEarlier = scaledMaxEarlierClusterTotal[cluster];
+
+            Position<T> p = row_min_avx512(row, maxEarlier, qBest);
+            rowMinima[r]  = p;
+
+            if (p.value < qBest) {
+                #pragma omp critical(qbest_update)
+                { if (p.value < qBest) qBest = p.value; }
+            }
+        }
+    }
+};
+
+using RapidNJ_V512F = RapidNJ_V512<NJFloat>;
+// ================== /RapidNJ_V512 (AVX-512 optimized) ========================
+
 
 #endif //USE_VECTORCLASS_LIBRARY
 
