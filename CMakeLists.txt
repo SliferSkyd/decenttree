@@ -540,9 +540,8 @@ int main() {
           AND (NOT DEFINED DT_CPU_HAS_AVX512VL OR DT_CPU_HAS_AVX512VL)
           AND (NOT DEFINED DT_CPU_HAS_FMA OR DT_CPU_HAS_FMA))
         set(DECENTTREE_FLAGS "avx512")
-      elseif (HAS_AVX2 AND HAS_FMA
-              AND (NOT DEFINED DT_CPU_HAS_AVX2 OR DT_CPU_HAS_AVX2)
-              AND (NOT DEFINED DT_CPU_HAS_FMA OR DT_CPU_HAS_FMA))
+      elseif (HAS_AVX2
+              AND (NOT DEFINED DT_CPU_HAS_AVX2 OR DT_CPU_HAS_AVX2))
         set(DECENTTREE_FLAGS "avx2")
       elseif (HAS_AVX AND HAS_FMA
               AND (NOT DEFINED DT_CPU_HAS_AVX OR DT_CPU_HAS_AVX)
@@ -618,15 +617,13 @@ elseif (ICC)
     endif()
 endif()
 
-# --- AVX2 ------------------------------------------------------
-# Enables compiler flags and preprocessor symbols for AVX2 (+FMA).
 SET(AVX2_FLAGS "-D__SSE3 -D__AVX -D__AVX2__")
 if (VCC)
-    # MSVC (VS 2013+ for /arch:AVX2)
     set(AVX2_FLAGS "${AVX2_FLAGS} /arch:AVX2")
-elseif (CLANG OR GCC)
-    # AVX2 era generally implies FMA on x86_64 (Haswell+)
+elseif (CLANG)
     set(AVX2_FLAGS "${AVX2_FLAGS} -mavx2 -mfma")
+elseif (GCC)
+    set(AVX2_FLAGS "${AVX2_FLAGS} -mavx2 -mfma -fabi-version=0")
 elseif (ICC)
     if (WIN32)
         set(AVX2_FLAGS "${AVX2_FLAGS} /arch:core-avx2")
@@ -635,18 +632,15 @@ elseif (ICC)
     endif()
 endif()
 
-# --- AVX-512 ---------------------------------------------------
-# Expand AVX-512 set for GCC/Clang to include common subsets.
-# NOTE: controlled by DECENTTREE_FLAGS "avx512" (and not "no512")
 SET(AVX512_FLAGS "-D__SSE3 -D__AVX")
 if (NOT DECENTTREE_FLAGS MATCHES "no512")
     if (VCC)
-        # VS 2022+ supports /arch:AVX512
         set(AVX512_FLAGS "${AVX512_FLAGS} /arch:AVX512")
-    elseif (CLANG OR GCC)
-        # Base + common subsets; adjust if you need more granularity
-        set(AVX512_FLAGS "${AVX512_FLAGS} -mavx512f -mavx512dq -mavx512bw -mavx512vl -mfma")
-    elseif (ICC)
+    elseif (CLANG)
+        set(AVX512_FLAGS "${AVX512_FLAGS} -mavx512f -mavx512dq -mavx512bw -mavx512vl -mfma -mbmi -mbmi2 -mpopcnt")
+    elseif (GCC)
+        set(AVX512_FLAGS "${AVX512_FLAGS} -mavx512f -mavx512dq -mavx512bw -mavx512vl -mfma -mbmi -mbmi2 -mpopcnt -fabi-version=0")
+        elseif (ICC)
         if (WIN32)
             set(AVX512_FLAGS "${AVX512_FLAGS} /QxCORE-AVX512")
         else()

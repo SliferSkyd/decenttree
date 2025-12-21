@@ -733,31 +733,33 @@ protected:
     }
     /**
      * @brief For each cluster, y, that is currently in play, find the
-     *        first MatrixEntry<T>, in that cluster's block of 
-     *        matrix entries for LOWER numbered clusters (which is
-     *        sorted by raw distance from y), that refers to a
-     *        cluster that is till in play (if any!).
+     * first MatrixEntry<T>, in that cluster's block of 
+     * matrix entries for LOWER numbered clusters (which is
+     * sorted by raw distance from y), that refers to a
+     * cluster that is till in play (if any!).
      * @param n - the number of clusters currently in play
      * @param q - the number of nodes there will be, in a
-     *            complete unrooted tree:(n0-1)*2, where n0 is
-     *            the number of rows in the input distance matrix
+     * complete unrooted tree:(n0-1)*2, where n0 is
+     * the number of rows in the input distance matrix
      * @note  reads:  row_cluster
      * @note  writes: row_raw_dist, row_best_distance, row_choice
      * @note  doesn't usually update cluster_sorted_start[y],
-     *        but will deallocate the memory allocated for the 
-     *        cluster, if its block of matrix entries no longer
-     *        has any distances to (lower-numbered) in-play clusters
-     *        in it. 
+     * but will deallocate the memory allocated for the 
+     * cluster, if its block of matrix entries no longer
+     * has any distances to (lower-numbered) in-play clusters
+     * in it. 
      */
     void previewRows(int n, int q) {
-        global_best_dist = infiniteDistance;
+        // FIX: Use a local variable for reduction, not the class member
+        T local_best_dist = infiniteDistance; 
+        
         FNJ_TRACE("\nPreview for n=" << n << "\n");
 
         //Problem here: reduction(min) not supported in Visual Studio C++ 19 on Windows
         //because Visual Studio C++ only supports OpenMP 2.0, and reduction(min) is OpenMP 3.1
         #ifdef _OPENMP
         #ifndef _MSC_VER
-        #pragma omp parallel for reduction(min:global_best_dist)
+        #pragma omp parallel for reduction(min:local_best_dist)
         #else
         #pragma omp parallel for
         #endif
@@ -782,14 +784,25 @@ protected:
                               << ", Ry=" << cluster_total_scaled[y]
                               << ", Dxy-Rx-Ry=" << row_best_dist[r]
                               << "\n");
+                    
+                    // FIX: Update the local variable, not the global member
+                    if (row_best_dist[r] < local_best_dist) {
+                        local_best_dist = row_best_dist[r];
+                    }
+                    
+                    // Keep MSVC critical section logic for compatibility, 
+                    // though strictly not needed for your GCC build
                     #ifdef _MSC_VER
                     #ifdef _OPENMP
                     #pragma omp critical
+                    {
+                         if (row_best_dist[r] < local_best_dist) {
+                             local_best_dist = row_best_dist[r];
+                         }
+                    }
                     #endif
                     #endif              
-                    if (row_best_dist[r]<global_best_dist) {
-                        global_best_dist = row_best_dist[r];
-                    }                    
+             
                     break;
                 } else {
                     FNJ_TRACE("For y=" << y << ", cluster x=" 
@@ -803,6 +816,9 @@ protected:
                 deallocateCluster(y);
             }
         }
+        
+        // FIX: Sync the local result back to the class member
+        global_best_dist = local_best_dist;
     }
 
     /**
