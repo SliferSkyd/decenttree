@@ -15,6 +15,15 @@ set (CMAKE_TRY_COMPILE_TARGET_TYPE "STATIC_LIBRARY")
 
 project(decenttree)
 
+include(CheckLanguage)
+check_language(CUDA)
+
+set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc")
+
+set(CMAKE_CUDA_COMPILER_WORKS 1)
+set(CMAKE_CUDA_COMPILER_ID_RUN 1)
+set(CMAKE_CUDA_COMPILER_FORCED 1)
+
 # Windows example usages:
 #------------------------
 # cmake -G "Visual Studio 12" <source_dir>          (32-bit version, compiled with MSVC)
@@ -761,12 +770,25 @@ endif(ZLIB_FOUND)
 ##################################################################
 
 add_subdirectory(vectorclass)
+enable_language(CUDA)
+add_library(dt_cuda_kernels OBJECT
+    cuda_kernels/bionj.cu   # Replace with your actual file
+)
+
+set_property(TARGET dt_cuda_kernels PROPERTY CUDA_ARCHITECTURES native)
+set_property(TARGET dt_cuda_kernels PROPERTY POSITION_INDEPENDENT_CODE ON)
+
 LIST(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}")
 
 add_compile_definitions(USE_PROGRESS_DISPLAY=1)
 add_compile_definitions(USE_VECTORCLASS_LIBRARY=1)
 add_compile_definitions(USE_GZSTREAM=1)
 add_compile_definitions(DECENT_TREE=1)
+
+target_include_directories(dt_cuda_kernels PRIVATE
+    "${PROJECT_SOURCE_DIR}"
+    "/usr/local/cuda/include"
+)
 
 message("CMake build type    : ${CMAKE_BUILD_TYPE}")
 message("CMake source dir    : ${CMAKE_SOURCE_DIR}")
@@ -813,6 +835,8 @@ add_executable(decenttree
     utils/operatingsystem.cpp  utils/operatingsystem.h
     utils/stringfunctions.cpp  utils/stringfunctions.h
     utils/vectortypes.cpp      utils/vectortypes.h)
+
+set_property(TARGET decenttree PROPERTY CUDA_ARCHITECTURES native)
 
 if(ZLIB_FOUND)
   target_link_libraries(decenttree ${ZLIB_LIBRARIES})
@@ -868,6 +892,12 @@ endif()
 # basic linking librararies
 target_link_libraries(decenttree vectorclass
     ${PLATFORM_LIB} ${STD_LIB})
+
+# This adds the compiled .o files directly to the final binary
+target_link_libraries(decenttree dt_cuda_kernels)
+
+# Ensure the linker finds the CUDA runtime libs (mimicking -lcudart)
+target_link_libraries(decenttree "/usr/local/cuda/lib64/libcudart.so")
 
 # setup the executable name
 ##################################################################

@@ -53,6 +53,7 @@
 #include "starttree.h"
 #include "upgma.h"
 #include "nj.h"
+#include "bionj_gpu.h"
 #include "rapidnj.h"
 #include "auctionmatrix.h"
 #include "fancyrapidnj.h"
@@ -111,6 +112,8 @@ void addBioNJ2020TreeBuilders(Registry& f) {
     #if USE_VECTORCLASS_LIBRARY
     //ADVERTISE(VectorizedUPGMA_Matrix<NJFloat>, "UPGMA-V", "Vectorized UPGMA (Sokal, Michener [1958])");
     #endif
+
+    ADVERTISE(BioNJGPU,         "BIONJ-GPU", "BioNJ on GPU");
 
     ADVERTISE(BoundingMatrix<double>,"NJ-R-D", "Double precision Rapid Neighbour Joining");
     f.setNameOfDefaultTreeBuilder(defaultName);
