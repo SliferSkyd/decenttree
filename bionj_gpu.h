@@ -2,7 +2,7 @@
 #define BIONJ_GPU_H
 
 #include "nj.h"
-#include "cuda_kernels/bionj.h"
+#include "hip_kernels/bionj.h"
 #include <vector>
 #include <iostream>
 

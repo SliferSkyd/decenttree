@@ -84,7 +84,6 @@ void addBioNJ2020TreeBuilders(Registry& f) {
     ADVERTISE(RapidNJ,           defaultName,   "Rapid Neighbour Joining"
                                                 " (Simonsen, Mailund, Pedersen [2011])");
     ADVERTISE(RapidNJ_VA,            "NJ-R-VA", "Rapid Neighbour Joining (vectorized AVX2, safe & aligned)");
-    ADVERTISE(RapidNJ_V512F,            "NJ-R-V512", "Rapid Neighbour Joining (vectorized AVX2)");
 
     ADVERTISE(FancyNJMatrix<NJFloat>,"ONJ-R",   "Rapid Neighbour Joining (a rival version)"
                                                 " (Simonsen, Mailund, Pedersen [2011])");
