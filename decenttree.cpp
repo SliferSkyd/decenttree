@@ -28,7 +28,8 @@
 #include <utils/operatingsystem.h> //for getOSName
 #include <utils/hammingdistance.h> //for hammingDistance
 #include <utils/stringfunctions.h> //for contains
-#include "starttree.h"       //for StartTree::Registry
+#include "starttree.h"
+#include "phasetimer.h"       //for PhaseTimer (-phase-time)
 #include "flatmatrix.h"      //for FlatMatrix
 #include "distancematrix.h"  //for loadDistanceMatrixInto
 #include "sequence.h"        //for 
@@ -445,13 +446,17 @@ bool prepInput(const std::string& fastaFilePath,
                FlatMatrix& m) {
     if (!fastaFilePath.empty() || !phylipFilePath.empty() ) {
         std::vector<char> is_site_variant;
-        if (!sequences.loadAlignment(fastaFilePath, phylipFilePath,
-                                     alphabet, unknown_char,
-                                     reportProgress, is_site_variant)) {
-            return false;
+        {
+            PhaseTimer t("1. load alignment");
+            if (!sequences.loadAlignment(fastaFilePath, phylipFilePath,
+                                         alphabet, unknown_char,
+                                         reportProgress, is_site_variant)) {
+                return false;
+            }
+            fixUpSequenceNames(truncateName, stripName, nameReplace, sequences);
         }
-        fixUpSequenceNames(truncateName, stripName, nameReplace, sequences);
         if (loadMatrix) {
+            PhaseTimer t("2. compute distance matrix");
             if (!loadSequenceDistancesIntoMatrix
                             (sequences, is_site_variant,
                             reportProgress, m, alphabet)) {
@@ -605,6 +610,7 @@ public:
         arg_map << new StringArgument("-aln-out",  "phylip alignment file path", phylipOutputPath);
         arg_map << new StringArgument("-dist-out", "distance matrix file path", distanceOutputFilePath);
         arg_map << new SwitchArgument("-no-matrix", isMatrixToBeLoaded, false);
+        arg_map << new SwitchArgument("-phase-time", phaseTimingEnabled(), true);
         arg_map << new StringArgument("-strip-name", "list of characters to strip from name",
                                       stripName);
         arg_map << new StringArgument("-truncate-name-at", "list of truncation characters",
@@ -828,6 +834,7 @@ int obeyCommandLineOptions(DecentTreeOptions& options) {
         succeeded = true;
     }
     else if (succeeded && options.isMatrixToBeLoaded) {
+        PhaseTimer t("3. construct tree (incl. clustering, GPU, RMSE, output)");
         succeeded = algorithm->constructTreeInMemory(m.getSequenceNames(),
                                                      m.getDistanceMatrix(),
                                                      options.outputFilePath);

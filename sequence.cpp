@@ -762,7 +762,14 @@ void SequenceLoader::setUpSerializedData() {
     sequence_data = new char*     [ rank ];
     unk_buffer    = new uint64_t  [ unkLen * rank ];
     unknown_data  = new uint64_t* [ rank ];
-    memset(unk_buffer, 0, unkLen * rank);
+    // NOTE: unk_buffer is uint64_t[unkLen*rank]; the third argument of memset
+    // is a BYTE count, so this must be scaled by sizeof(uint64_t).  Zeroing
+    // only unkLen*rank bytes left 7/8 of the buffer uninitialised, and the
+    // loop below writes a row's trailing partial word only when it is
+    // non-zero, so countBitsSetInEither() went on to count leftover garbage
+    // bits.  That made count_unknown - and hence adjSeqLen, and hence every
+    // corrected distance - vary between runs on identical input.
+    memset(unk_buffer, 0, unkLen * rank * sizeof(uint64_t));
     #if USE_PROGRESS_DISPLAY
     const char* task = report_progress ? "Extracting variant sites": "";
     progress_display extract_progress(rank, task, "extracted from", "sequence");
@@ -800,7 +807,9 @@ void SequenceLoader::setUpSerializedData() {
                 unk = 0;
             }
         }
-        if (unk!=0) {
+        if ((seqLen & 63) != 0) {
+            //Write the trailing partial word unconditionally: leaving it
+            //untouched when unk==0 relies on the buffer being zeroed.
             *write_unk = unk;
         }
         #if USE_PROGRESS_DISPLAY
