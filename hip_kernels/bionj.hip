@@ -1,6 +1,7 @@
 #include "hip/hip_runtime.h"
 #include <cfloat>
 #include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <vector>
 #include <algorithm>
@@ -414,6 +415,48 @@ __global__ void k_get_final3_compact(const float* D, const int* map, int N_orig,
 
 #if !DT_BIONJ_GPU_CPU_REFERENCE
 
+/**
+ * Pick the GPU to run on, instead of silently using device 0.
+ *
+ * These nodes have 8 GCDs and are shared, so device 0 is often busy with
+ * someone else's job while the other seven are idle.  Two N x N float
+ * matrices at N=60,386 need 29 GiB, so landing on a busy device fails with a
+ * bare "out of memory" even though the machine has 500 GiB of free VRAM.
+ * Choose the device with the most free memory, and if none can hold the
+ * matrices say so with the actual numbers rather than just erroring out.
+ *
+ * Honours HIP_VISIBLE_DEVICES as usual, since that filters what we can see.
+ */
+static int choose_device(size_t needed) {
+    int count = 0;
+    if (hipGetDeviceCount(&count) != hipSuccess || count < 1) {
+        return 0;
+    }
+    int    best      = -1;
+    size_t best_free = 0;
+    for (int d = 0; d < count; ++d) {
+        size_t dev_free = 0, dev_total = 0;
+        if (hipSetDevice(d) != hipSuccess)                     continue;
+        if (hipMemGetInfo(&dev_free, &dev_total) != hipSuccess) continue;
+        if (best < 0 || dev_free > best_free) { best = d; best_free = dev_free; }
+    }
+    if (best < 0) {
+        return 0;
+    }
+    const double GiB = 1024.0 * 1024.0 * 1024.0;
+    if (best_free < needed) {
+        fprintf(stderr, "GPU memory: need %.1f GiB but the freest of %d device(s)"
+                        " (device %d) has only %.1f GiB free.\n",
+                needed / GiB, count, best, best_free / GiB);
+        exit(1);
+    }
+    CHECK_HIP(hipSetDevice(best));
+    printf("Using GPU device %d of %d (%.1f GiB free, needs %.1f GiB)\n",
+           best, count, best_free / GiB, needed / GiB);
+    fflush(stdout);
+    return best;
+}
+
 extern "C" 
 void launch_bionj_gpu(const float* h_dist, const float* h_var, int N, 
                       GPUMergeEvent* h_history, 
@@ -431,10 +474,20 @@ void launch_bionj_gpu(const float* h_dist, const float* h_var, int N,
 
     size_t mat_sz = (size_t)N * (size_t)N * sizeof(float);
 
-    PhaseTimer t_alloc("3c-1. device allocation");
     int threads = 256;
     int fixed_large_grid = 256;
     int reduce_blocks = 256;
+
+    // 2 matrices, plus the row/reduction scratch and the merge history
+    size_t needed = 2 * mat_sz
+                  + (size_t)N * (sizeof(float) + sizeof(int) + sizeof(float) + sizeof(size_t))
+                  + (size_t)(N > 3 ? N - 3 : 1) * sizeof(GPUMergeEvent)
+                  + (size_t)reduce_blocks * (sizeof(float) + sizeof(size_t))
+                  + (size_t)fixed_large_grid * sizeof(float)
+                  + (256u << 20);           // headroom for the runtime's own context
+    choose_device(needed);
+
+    PhaseTimer t_alloc("3c-1. device allocation");
 
     CHECK_HIP(hipMalloc(&d_D, mat_sz));
     CHECK_HIP(hipMalloc(&d_V, mat_sz));
