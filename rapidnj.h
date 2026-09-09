@@ -200,6 +200,21 @@ public:
             return 0;
         #endif
     }
+    /**
+     * @brief  Get the size of the team currently executing.  Unlike
+     *         getThreadCount(), this must be called from *inside* a parallel
+     *         region (it does not open one of its own, which would measure a
+     *         nested team rather than the enclosing one).
+     * @return intptr_t - threads in the enclosing team, at least 1
+     */
+    intptr_t getThreadsInTeam() const {
+        #ifdef _OPENMP
+            intptr_t n = omp_get_num_threads();
+            return (n < 1) ? 1 : n;
+        #else
+            return 1;
+        #endif
+    }
     virtual std::string getAlgorithmName() const {
         return "Rapid" + super::getAlgorithmName();
     }
@@ -247,8 +262,14 @@ public:
             #pragma omp parallel num_threads(threadCount)
             #endif
             {
-                intptr_t threadNum = getThreadNumber();
-                for (intptr_t r=threadNum; r<row_count; r+=threadCount) {
+                //num_threads() is a request, not a guarantee: on a busy
+                //machine the runtime may hand out a smaller team.  Stride by
+                //the size of the team we actually got, or the rows of S and I
+                //belonging to the threads we did not get are never sorted,
+                //and the pruned search then reads uninitialised entries.
+                intptr_t threadNum  = getThreadNumber();
+                intptr_t threadsRun = getThreadsInTeam();
+                for (intptr_t r=threadNum; r<row_count; r+=threadsRun) {
                     sortRow(r,r,false,sorters[threadNum]);
                     //copies the "left of the diagonal" portion of
                     //row r from the D matrix and sorts it
@@ -284,8 +305,9 @@ public:
                     #pragma omp parallel num_threads(threadCount)
                     #endif
                     {
+                        intptr_t threadsRun = getThreadsInTeam();
                         for (intptr_t r=getThreadNumber(); 
-                            r<row_count; r+=threadCount) {
+                            r<row_count; r+=threadsRun) {
                             purgeRow(r);
                         }
                     }
