@@ -428,10 +428,26 @@ __global__ void k_get_final3_compact(const float* D, const int* map, int N_orig,
  * Honours HIP_VISIBLE_DEVICES as usual, since that filters what we can see.
  */
 static int choose_device(size_t needed) {
+    const double GiB = 1024.0 * 1024.0 * 1024.0;
     int count = 0;
     if (hipGetDeviceCount(&count) != hipSuccess || count < 1) {
         return 0;
     }
+
+    // An explicit pin wins, for controlled measurements on a shared node.
+    if (const char* pin = getenv("DT_BIONJ_GPU_DEVICE")) {
+        int d = atoi(pin);
+        if (0 <= d && d < count) {
+            CHECK_HIP(hipSetDevice(d));
+            printf("Using GPU device %d of %d (pinned by DT_BIONJ_GPU_DEVICE,"
+                   " needs %.1f GiB)\n", d, count, needed / GiB);
+            fflush(stdout);
+            return d;
+        }
+        fprintf(stderr, "DT_BIONJ_GPU_DEVICE=%s is not in [0,%d); ignoring.\n",
+                pin, count);
+    }
+
     int    best      = -1;
     size_t best_free = 0;
     for (int d = 0; d < count; ++d) {
@@ -440,21 +456,38 @@ static int choose_device(size_t needed) {
         if (hipMemGetInfo(&dev_free, &dev_total) != hipSuccess) continue;
         if (best < 0 || dev_free > best_free) { best = d; best_free = dev_free; }
     }
-    if (best < 0) {
-        return 0;
+    if (best >= 0 && best_free >= needed) {
+        CHECK_HIP(hipSetDevice(best));
+        printf("Using GPU device %d of %d (%.1f GiB free, needs %.1f GiB)\n",
+               best, count, best_free / GiB, needed / GiB);
+        fflush(stdout);
+        return best;
     }
-    const double GiB = 1024.0 * 1024.0 * 1024.0;
-    if (best_free < needed) {
-        fprintf(stderr, "GPU memory: need %.1f GiB but the freest of %d device(s)"
-                        " (device %d) has only %.1f GiB free.\n",
-                needed / GiB, count, best, best_free / GiB);
-        exit(1);
+
+    // hipMemGetInfo is not always trustworthy on a busy multi-GCD node: it can
+    // report zero free bytes on every device while allocations of tens of GiB
+    // still succeed.  Rather than refuse to run on a bad reading, ask the
+    // allocator directly and keep the first device that can actually hold the
+    // matrices.  Devices that really are full fail here, so this also steers
+    // away from GCDs occupied by other jobs.
+    for (int d = 0; d < count; ++d) {
+        if (hipSetDevice(d) != hipSuccess) continue;
+        void* probe = nullptr;
+        if (hipMalloc(&probe, needed) == hipSuccess) {
+            hipFree(probe);
+            CHECK_HIP(hipSetDevice(d));
+            printf("Using GPU device %d of %d (probed, needs %.1f GiB)\n",
+                   d, count, needed / GiB);
+            fflush(stdout);
+            return d;
+        }
+        (void)hipGetLastError();
     }
-    CHECK_HIP(hipSetDevice(best));
-    printf("Using GPU device %d of %d (%.1f GiB free, needs %.1f GiB)\n",
-           best, count, best_free / GiB, needed / GiB);
-    fflush(stdout);
-    return best;
+
+    fprintf(stderr, "GPU memory: need %.1f GiB but no device of %d could"
+                    " allocate it (freest report was %.1f GiB).\n",
+            needed / GiB, count, best < 0 ? 0.0 : best_free / GiB);
+    exit(1);
 }
 
 extern "C" 
