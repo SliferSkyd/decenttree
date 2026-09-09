@@ -88,6 +88,7 @@
 #include "distancematrix.h"          //for Matrix template class
 #include "hashrow.h"                 //for HashRow template class
 #include "clustertree.h"             //for ClusterTree template class
+#include "phasetimer.h"              //for StageTimer
 #include "utils/parallel_mergesort.h"
 
 #if (!USE_PROGRESS_DISPLAY)
@@ -326,7 +327,10 @@ public:
 
         int degree_of_root = isRooted ? 2 : 3;
         while ( degree_of_root < row_count ) {
-            getMinimumEntry(best);
+            {
+                StageTimer stage(STAGE_PAIR_SEARCH);
+                getMinimumEntry(best);
+            }
             cluster(best.column, best.row);
             #if USE_PROGRESS_DISPLAY
             show_progress += row_count;

@@ -854,6 +854,7 @@ int obeyCommandLineOptions(DecentTreeOptions& options) {
         std::cerr << "Distance matrix calculation failed." << std::endl;
         return 1;
     }
+    reportLoopStages();
     if (!succeeded) {
         std::cerr << "Tree construction failed." << std::endl;
         return 1;

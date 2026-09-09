@@ -220,18 +220,21 @@ protected:
         auto aRow       = rows[a];
         auto bRow       = rows[b];
         T cTotal        = (T)0.0;
-        #ifdef _OPENMP
-        #pragma omp parallel for reduction(+:cTotal)
-        #endif
-        for (intptr_t i=0; i<row_count; ++i) {
-            if (i!=a && i!=b) {
-                T Dai         = aRow[i];
-                T Dbi         = bRow[i];
-                T Dci         = lambda * Dai + mu * Dbi + dCorrection;
-                aRow[i]       = Dci;
-                rows[i][a]    = Dci;
-                rowTotals[i] += Dci - Dai - Dbi;
-                cTotal       += Dci;
+        {
+            StageTimer stage(STAGE_UPDATE);
+            #ifdef _OPENMP
+            #pragma omp parallel for reduction(+:cTotal)
+            #endif
+            for (intptr_t i=0; i<row_count; ++i) {
+                if (i!=a && i!=b) {
+                    T Dai         = aRow[i];
+                    T Dbi         = bRow[i];
+                    T Dci         = lambda * Dai + mu * Dbi + dCorrection;
+                    aRow[i]       = Dci;
+                    rows[i][a]    = Dci;
+                    rowTotals[i] += Dci - Dai - Dbi;
+                    cTotal       += Dci;
+                }
             }
         }
         clusters.addCluster ( rowToCluster[a], aLength,
@@ -239,7 +242,10 @@ protected:
         rowTotals[a]    = cTotal;
         rowToCluster[a] = clusters.size()-1;
         rowToCluster[b] = rowToCluster[row_count-1];
-        removeRowAndColumn(b);
+        {
+            StageTimer stage(STAGE_COMPACT);
+            removeRowAndColumn(b);
+        }
     }
     /**
      * @brief Finish the tree, by joining the last two or three clusters.
@@ -350,6 +356,8 @@ protected:
         T buLength        = abLength - auLength;
         T dCorrection     = - lambda * auLength - mu * buLength;
         T cTotal          = (T)0.0;
+        {
+            StageTimer stage(STAGE_UPDATE);
         #ifdef _OPENMP
         #pragma omp parallel for reduction(+:cTotal)
         #endif
@@ -365,12 +373,16 @@ protected:
                 cTotal       += Dci;
             }
         }
+        }
         clusters.addCluster ( rowToCluster[a], auLength,
                               rowToCluster[b], buLength);
         rowTotals[a]    = cTotal;
         rowToCluster[a] = clusters.size()-1; //cluster u
         rowToCluster[b] = rowToCluster[row_count-1];
-        removeRowAndColumn(b);
+        {
+            StageTimer stage(STAGE_COMPACT);
+            removeRowAndColumn(b);
+        }
     }
 };
 
@@ -480,7 +492,11 @@ public:
         T aLength         = medianLength + fudge;
         T bLength         = medianLength - fudge;
         T Vab             = variance.rows[b][a];     //BIO
-        T lambda          = chooseLambda(a, b, Vab); //BIO
+        T lambda;                                    //BIO
+        {
+            StageTimer stage(STAGE_LAMBDA);
+            lambda        = chooseLambda(a, b, Vab); //BIO
+        }
         T mu              = (T)1.0 - lambda;
         T dCorrection     = - lambda * aLength - mu * bLength;
         T vCorrection     = - lambda * mu * Vab;
@@ -489,6 +505,8 @@ public:
         auto varianceRowA = variance.rows[a];
         auto varianceRowB = variance.rows[b];
         T cTotal          = (T)0.0;
+        {
+            StageTimer stage(STAGE_UPDATE);
         #ifdef _OPENMP
         #pragma omp parallel for reduction(+:cTotal)
         #endif
@@ -512,12 +530,16 @@ public:
                 //BIO finish
             }
         }
+        }
         clusters.addCluster ( rowToCluster[a], aLength, rowToCluster[b], bLength);
         rowTotals[a]    = cTotal;
         rowToCluster[a] = clusters.size()-1;
         rowToCluster[b] = rowToCluster[row_count-1];
-        removeRowAndColumn(b);
-        variance.removeRowAndColumn(b); //BIO
+        {
+            StageTimer stage(STAGE_COMPACT);
+            removeRowAndColumn(b);
+            variance.removeRowAndColumn(b); //BIO
+        }
     }
     virtual void prepareToConstructTree() override {
         variance = *this;

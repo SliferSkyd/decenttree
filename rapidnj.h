@@ -242,6 +242,7 @@ public:
             //   RapidNJ papers).
             entriesSorted.setSize(row_count);
             entryToCluster.setSize(row_count);
+            StageTimer stage(STAGE_RNJ_UPKEEP);
             #ifdef _OPENMP
             #pragma omp parallel num_threads(threadCount)
             #endif
@@ -272,9 +273,13 @@ public:
             intptr_t degree_of_root = isRooted ? 2 : 3;
             while (degree_of_root<row_count) {
                 Position<T> best;
-                super::getMinimumEntry(best);
+                {
+                    StageTimer stage(STAGE_PAIR_SEARCH);
+                    super::getMinimumEntry(best);
+                }
                 cluster(best.column, best.row);
                 if ( row_count == nextPurge ) {
+                    StageTimer stage(STAGE_RNJ_UPKEEP);
                     #ifdef _OPENMP
                     #pragma omp parallel num_threads(threadCount)
                     #endif
@@ -396,6 +401,7 @@ public:
 
         super::cluster(a,b);
 
+        StageTimer stage(STAGE_RNJ_UPKEEP);
         if (b<row_count) {
             clusterToRow[clusterMoved] = static_cast<int>(b);
         }
